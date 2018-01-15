@@ -1,0 +1,1198 @@
+
+<!-- saved from url=(0048)https://grader2.eecs.umich.edu/eecs482/project3/ -->
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<title>Project 3 -- memory manager</title>
+<style>@media print {#ghostery-purple-box {display:none !important}}</style></head>
+<body>
+<h1>Project 3 -- memory manager</h1>
+Worth: 15 points<br>
+Assigned: Thursday, October 19, 2017<br>
+Due: Tuesday, November 14, 2017
+
+<h2 id="overview">1. Overview</h2>
+
+<p>
+<!--
+This project will help you understand address spaces and virtual memory
+management.
+-->
+In this project, you will design and implement a <em>pager</em>, which is
+the part of the kernel that manages application processes' virtual address
+spaces.  Your pager will manage a <em>portion</em> of each application
+process's address space; we call this portion the <em>arena</em>.  Pages in
+the arena will be stored in physical memory, in a swap file, or in a
+regular file.  Your pager will manage these resources on behalf of all the
+applications it manages.
+
+</p><p>
+Your pager will implement system calls that applications can use to create,
+copy, and destroy address spaces, allocate space in an existing address
+space, and switch between address spaces.  Your pager will also implement
+the interrupt handler for memory faults.
+
+<!--
+Your pager will be single threaded, handling each request to completion
+before processing the next request.
+-->
+
+</p><p>
+This handout is organized as follows:
+</p><ul>
+
+<li> <a href="https://grader2.eecs.umich.edu/eecs482/project3/#infrastructure">Section 2</a> describes the overall
+structure of the system.
+
+</li><li> <a href="https://grader2.eecs.umich.edu/eecs482/project3/#mmu">Section 3</a> describes the simulated hardware used
+in this project.
+
+</li><li> <a href="https://grader2.eecs.umich.edu/eecs482/project3/#calls">Section 4</a> describes the system calls that applications
+can use to communicate explicitly with the pager.
+
+</li><li> <a href="https://grader2.eecs.umich.edu/eecs482/project3/#pager">Sections 5 and 6</a> are the main sections; they
+describe the functionality that you will implement in the pager and how to
+design your pager to minimize work.
+
+</li><li> <a href="https://grader2.eecs.umich.edu/eecs482/project3/#hardware">Section 7</a> describes how your pager will
+maintain the emulated page tables and access physical memory and files.
+
+</li><li> <a href="https://grader2.eecs.umich.edu/eecs482/project3/#hints">Section 8</a> gives some hints for doing the project,
+
+</li><li> <a href="https://grader2.eecs.umich.edu/eecs482/project3/#testcases">Sections 9-12</a> describe the test suite and
+project logistics/grading.
+
+</li></ul>
+
+<h2 id="infrastructure">2. System structure</h2>
+
+<p>
+The system has two types of entities: application processes and the kernel
+(you are writing the pager part of the kernel).  Application processes
+communicate with the kernel via system calls and page faults.  In turn,
+the kernel provides processes with the address space abstraction by reading
+and writing physical memory, files, swap space, page tables, and the page
+table base register.  (The kernel also has an address space, but you are
+not responsible for managing the kernel's address space).
+
+</p><p>
+Applications interact with the kernel through the following mechanisms
+(summarized by the diagram below):
+
+</p><ul>
+
+<li> An application requests service from the kernel by making system
+calls.  This project deals with the following system calls: <tt>fork</tt>,
+<tt>exit</tt>, <tt>vm_yield</tt>, and <tt>vm_map</tt>.  A system call
+invokes the computer's exception handling mechanism, which transfers
+control safely to the registered kernel handler for that system call.
+
+</li><li> An application also transfers control to the kernel when it executes a
+load or store instruction to an address that is non-resident or protected.
+On such accesses, the MMU triggers a page fault, and the exception handling
+mechanism transfers control to the kernel's page fault handler.  The MMU
+retries the faulting instruction after the page fault handler returns.
+
+</li><li> When the application executes a load or store instruction to an
+address that is resident in memory, and the access is allowed by the page's
+protection, the MMU translates the virtual address to a physical address
+using the page table entry (PTE) for that address, which is stored in the
+page table pointed to by the page table base register (PTBR).  The processor
+then accesses that physical address.
+
+</li></ul>
+
+<br> <br>
+<img align="center" height="450" src="./Project 3 -- memory manager_files/structure.jpg">
+<br> <br>
+
+<p>
+Items in [brackets] may or may not be called, depending on what processes
+are running.  Note that there are two versions of <tt>vm_map</tt>: one in
+the application and one in the pager.  The application-side <tt>vm_map</tt>
+is a system call wrapper and is called by the application process.  When
+the application calls this function, the infrastructure invokes the
+corresponding system call in your pager.  <tt>vm_yield</tt> is another
+system call wrapper and may cause the infrastructure to call
+<tt>vm_switch</tt>.  The declarations for these functions are in
+<a href="https://grader2.eecs.umich.edu/eecs482/project3/vm_app.h"><tt>vm_app.h</tt></a> and <a href="https://grader2.eecs.umich.edu/eecs482/project3/vm_pager.h"><tt>vm_pager.h</tt></a>.
+
+</p><p>
+We provide the software infrastructure shown in grey.  This infrastructure
+emulates the MMU and exception-handling functionality of normal hardware,
+as well as physical memory and file and swap space.  To use this
+infrastructure, each application that uses the pager must include
+<a href="https://grader2.eecs.umich.edu/eecs482/project3/vm_app.h"><tt>vm_app.h</tt></a> and link with
+<a href="https://grader2.eecs.umich.edu/eecs482/project3/libvm_app.o"><tt>libvm_app.o</tt></a>, and your pager must include
+<a href="https://grader2.eecs.umich.edu/eecs482/project3/vm_pager.h"><tt>vm_pager.h</tt></a> and link with
+<a href="https://grader2.eecs.umich.edu/eecs482/project3/libvm_pager.o"><tt>libvm_pager.o</tt></a>.
+Linking with these libraries enables application processes to communicate
+with the pager in the same way that applications on real hardware
+communicate with real operating systems.  Applications issue load and store
+instructions (compiled from normal C++ variable accesses), and these are
+translated or faulted by the infrastructure exactly as in the above
+description of the MMU.  The infrastructure transfers control on faults and
+system calls to the pager, which receives control via function calls.
+The infrastructure also invokes your pager's <tt>vm_init</tt> function
+when the pager starts.
+
+<!--
+You do not need to
+understand the mechanisms used to emulate this functionality (in case
+you're curious, the infrastructure uses <tt>mmap</tt>, <tt>mprotect</tt>,
+<tt>SEGV</tt> signal handlers, Unix domain sockets, and remote procedure
+calls).
+-->
+
+<!--
+<p>
+, when a process is created or destroyed, and when the simulated
+MMU detects a fault.
+
+<p>
+The CPU's memory management unit (MMU) and
+exception mechanism make it possible for the operating system
+to efficiently manage address spaces.
+
+The MMU is involved in every virtual memory access:
+
+<ul>
+
+
+<p>
+A page fault occurs when the 
+-->
+
+</p><h2 id="mmu">3. Memory management hardware</h2>
+
+<p>
+The system uses a single-level page table.  A virtual address is composed
+of a virtual page number and a page offset:
+
+<br> <br>
+<img align="center" height="60" src="./Project 3 -- memory manager_files/address.jpg">
+<br> <br>
+
+</p><p>
+When the application executes a load or store instruction, the MMU checks
+the protection bits of the virtual page being accessed, translates the
+virtual address to a physical address, and accesses the page.  To carry out
+these tasks, the MMU uses information in the <em>page table entry (PTE)</em>
+for the virtual page being accessed.  The array of PTEs for a process is
+called a <em>page table</em>.  In this project, the page table stores an
+entry for each virtual page in the arena.
+
+<!--
+Page table entries are stored as an array
+(called a page table)
+
+The page table for a process is an array of page table entries (PTEs), with
+one PTE for each virtual page in the arena.
+-->
+
+</p><p>
+Page tables are stored in the kernel's address space.  The system's
+<em>page table base register (PTBR)</em> contains the kernel address of the
+page table currently in use.  The PTBR is a variable that is declared and
+defined by the infrastructure (but will be controlled by your pager).
+
+</p><p>
+<a href="https://grader2.eecs.umich.edu/eecs482/project3/vm_arena.h"><tt>vm_arena.h</tt></a> describes the arena
+of a process, which are the addresses in the range
+[<tt>VM_ARENA_BASEADDR , VM_ARENA_BASEADDR + VM_ARENA_SIZE)</tt>.
+
+</p><p>
+The following portion of <a href="https://grader2.eecs.umich.edu/eecs482/project3/vm_pager.h"><tt>vm_pager.h</tt></a>
+describes a page table entry, page table, and page table base register.
+Note that the MMU for this project does not automatically maintain dirty
+and reference bits.  Instead, these state bits will be maintained by your
+pager.
+
+<!--
+Some MMUs automatically maintain dirty and reference bits; other MMUs
+leave this task to be handled in software.  The MMU in this project does
+<strong>not</strong> maintain dirty or reference bits automatically.
+Instead, these state bits will be maintained by your pager.
+-->
+
+<!--
+The MMU locates the page table through the page table base
+register (PTBR).
+-->
+
+<!--
+When the virtual page is accessible, the
+MMU translates the virtual address to a physical address and reads or write
+the requested memory.  When the virtual page is not accessible, the MMU
+triggers a page fault in the kernel, then retries the access when the
+page fault handler returns.
+
+<p>
+The MMU uses the page table entries (PTEs) of the current page table
+to determine when to generate page faults
+
+current page table to fault 
+-->
+
+</p><p>
+
+</p><hr>
+<pre>/*
+ * **************************************
+ * * Definition of page table structure *
+ * **************************************
+ */
+
+/*
+ * Format of page table entry.
+ *
+ * read_enable=0 ==&gt; loads to this virtual page will fault
+ * write_enable=0 ==&gt; stores to this virtual page will fault
+ * ppage refers to the physical page for this virtual page (unused if
+ * both read_enable and write_enable are 0)
+ */
+struct page_table_entry_t {
+    unsigned int ppage : 20;		/* bit 0-19 */
+    unsigned int read_enable : 1;	/* bit 20 */
+    unsigned int write_enable : 1;	/* bit 21 */
+};
+
+/*
+ * Format of page table.  Entries start at the beginning of the arena,
+ * i.e., ptes[0] is the page table entry for the first virtual page in the arena
+ */
+struct page_table_t {
+    page_table_entry_t ptes[VM_ARENA_SIZE/VM_PAGESIZE];
+};
+
+/*
+ * MMU's page table base register.  This variable is defined by the
+ * infrastructure, but it is controlled completely by the student's pager code.
+ */
+extern page_table_t *page_table_base_register;
+</pre>
+<hr>
+
+<h2 id="calls">4. Application semantics</h2>
+
+<p>
+This section describes the semantics of an address space that are provided
+to applications.  Note that these describe the behavior of an address space
+<em>from the perspective of an application</em>.  As with most operating
+system abstractions, the physical reality may differ from the illusion
+seen by an application.  For example, the application sees all valid
+pages as being in memory, but these pages may actually exist only on disk.
+
+</p><h3>4.1. Swap-backed and file-backed pages</h3>
+
+<p>
+The system supports two types of virtual pages: swap-backed and
+file-backed.
+
+</p><p>
+A swap-backed virtual page is initialized to all zeroes when the page is
+added to the address space.  The data in a swap-backed page are lost when
+the process exits.  A swap-backed page is private to a process, i.e., it is
+not shared with any other virtual page, either in the same process or
+other processes.
+
+</p><p>
+A file-backed virtual page corresponds to a specific block of a specific
+file.  The data in a file-backed virtual page lives as long as the file
+exists (assume files are neither created nor destroyed while the pager is
+running).  A particular file block can be mapped simultaneously to multiple
+processes or to multiple pages in one process, and all virtual pages that
+are mapped to this file block refer to the same data (i.e., they are
+aliases).  For example, stores to one virtual page mapped to this file
+block are seen by loads to all virtual pages mapped to this file block.
+
+<!--
+<li>If the <tt>filename</tt> parameter to <tt>vm_map</tt> is not
+<tt>nullptr</tt>, the new virtual page is backed by the specified file at
+the specified block and is shared with other virtual pages
+that are mapped to that file and block.  <tt>filename</tt> is a
+null-terminated C string and must reside completely in the valid portion of
+the arena.
+-->
+
+</p><h3 id="calls">4.2. System calls</h3>
+
+<p>
+Applications use four system calls to communicate explicitly with the
+pager: <tt>vm_map</tt>, <tt>vm_yield</tt>, <tt>fork</tt>, and
+<tt>exit</tt>.  The prototypes for <tt>vm_map</tt> and <tt>vm_yield</tt>
+are given in the file <a href="https://grader2.eecs.umich.edu/eecs482/project3/vm_app.h"><tt>vm_app.h</tt></a>; the
+prototypes for <tt>fork</tt> and <tt>exit</tt> are given in the Linux
+manual pages.  Most application programs only use <tt>vm_map</tt>
+explicitly, since <tt>fork</tt> and <tt>exit</tt> are called implicitly
+when a process starts and ends, and <tt>vm_yield</tt> is used only to
+control process scheduling.
+
+</p><p>
+A process calls <tt>vm_map(filename, block)</tt> to ask for the lowest
+invalid page in its arena to be declared valid.  <tt>vm_map</tt> returns
+the address of the new virtual page.  E.g., if the valid part of the arena
+is <tt>0x600000000-0x600003fff</tt>, the return value of the next
+<tt>vm_map</tt> call will be <tt>0x600004000</tt>, and the resulting valid
+part of the arena will be <tt>0x600000000-0x600004fff</tt>.
+
+<tt>vm_map</tt> can be used to map swap-backed or file-backed pages.
+A swap-backed page is mapped if <tt>filename</tt> is <tt>nullptr</tt>;
+otherwise a file-backed page is mapped to the specified <tt>filename</tt>
+and <tt>block</tt>.  When mapping a file-backed page,
+<tt>filename</tt> should be a null-terminated C string and
+must reside completely in the valid portion of the arena.
+
+(FYI, the <tt>vm_map</tt> interface is similar to the <tt>mmap</tt> call
+provided by Linux.  The interfaces you normally use to to manage dynamic
+memory (<tt>new</tt>, <tt>delete</tt>, <tt>malloc</tt>, and <tt>free</tt>)
+are built on top of <tt>mmap</tt>.)
+
+</p><p>
+A process calls <tt>vm_yield</tt> to ask the pager to run another
+process.  If no other process is running, <tt>vm_yield</tt> has no effect.
+The infrastructure's scheduling policy is non-preemptive: the current
+application process runs until it calls <tt>vm_yield</tt> or exits.
+
+</p><p>
+A (parent) process calls <tt>fork</tt> to create a new (child) process.
+The child process starts with a copy of the parent's address space,
+including a copy of the mappings and data of the parent's arena.  Note that
+the data in a child's swap-backed page is only a <em>copy</em> of the data
+in its parent's page; swap-backed virtual pages are not shared with
+each other from the processes' perspectives.
+
+<!--
+(though the pager may choose to share a physical page or swap
+block among swap-backed virtual pages with the same data).
+-->
+
+</p><p>
+A process calls <tt>exit</tt> to ask the pager to destroy its address space.
+Data in a process's swap-backed pages are lost when the process exits.
+File-backed pages are not affected when a process exits.
+
+<!--
+???
+<p>
+In addition to these explicit system calls, applications may also
+communicate implicitly with the pager by loading or storing to an address
+in the arena.  Depending on the protections and residencies set by the
+pager, some of these loads and stores will result in calls to the pager's
+<tt>vm_fault</tt> function.  These faults are serviced without the
+application's knowledge.
+-->
+
+<!--
+<p>
+Finally, applications communicate implicitly with the pager when they are
+created by the <tt>fork</tt> system call.  The pager's <tt>vm_create</tt>
+function will be called when the process is created.
+-->
+
+</p><p>
+Here is an example application program that uses the pager.
+</p><hr>
+<pre>#include &lt;iostream&gt;
+#include &lt;cstring&gt;
+#include &lt;unistd.h&gt;
+#include "vm_app.h"
+
+using namespace std;
+
+int main()
+{
+    /* Allocate swap-backed page from the arena */
+    char *filename = (char *) vm_map(nullptr, 0);
+
+    /* Write the name of the file that will be mapped */
+    strcpy(filename, "shakespeare.txt");
+
+    /* Map a page from the specified file */
+    char *p = (char *) vm_map (filename, 0);
+
+    /* Print the first speech from the file */
+    for (unsigned int i=0; i&lt;2561; i++) {
+	cout &lt;&lt; p[i];
+    }
+}
+</pre>
+<hr>
+
+<h2 id="pager">5. Pager functions</h2>
+
+<p>
+This section describes the functions you will implement in your pager:
+<tt>vm_init</tt>, <tt>vm_create</tt>, <tt>vm_switch</tt>,
+<tt>vm_map</tt>, <tt>vm_fault</tt>, and <tt>vm_destroy</tt>.  These
+functions are declared in <a href="https://grader2.eecs.umich.edu/eecs482/project3/vm_pager.h"><tt>vm_pager.h</tt></a>.  The
+rest of the kernel (e.g., <tt>main</tt>) is implemented in <a href="https://grader2.eecs.umich.edu/eecs482/project3/libvm_pager.o"><tt>libvm_pager.o</tt></a> and will call your pager
+functions in response to various events in the system (e.g., system
+initialization, system calls, page faults).
+
+</p><p>
+This section describes when each pager function is called by the
+infrastructure and, in general terms, what is the purpose of each function.
+Your job in this project is to design and implement the specifics of your
+pager to carry out these purposes as efficiently as possible (this is
+discussed more in <a href="https://grader2.eecs.umich.edu/eecs482/project3/#design">Section 6</a>).
+
+</p><h3 id="vm_init">5.1. <tt>vm_init(size_t memory_pages, size_t swap_blocks)</tt></h3>
+
+<p>
+The infrastructure calls <tt>vm_init</tt> when the pager starts.
+<tt>memory_pages</tt> and <tt>swap_blocks</tt> specify the number of
+physical memory pages and swap blocks in the system.  <tt>vm_init</tt>
+should set up whatever data structures you need to begin accepting
+<tt>vm_create</tt> and subsequent requests from processes.
+
+</p><p>
+You may assume that, once started, the pager never exits.
+
+</p><h3 id="vm_create">5.2. <tt>vm_create(pid_t parent_pid, pid_t child_pid)</tt></h3>
+
+<p>
+The infrastructure calls <tt>vm_create</tt> when a <em>parent</em> process
+creates a new <em>child</em> process via the <tt>fork</tt> system call.
+The pager should initialize whatever data structures it needs to
+manage the new child process.  In addition, it should cause the child's
+arena to be a duplicate of the parent's arena.  That is, each page in the
+child's arena should have the same mapping as the corresponding
+page in the parent's arena (both swap-backed and file-backed pages), and
+the data in the child's arena should appear (to the child) to be
+initialized to the values that were in the parent's arena when the child
+was created.  The pager will use copy-on-write sharing
+(<a href="https://grader2.eecs.umich.edu/eecs482/project3/#cow">Section 6.3</a>) to defer copying the parent's data, so
+creating the child will not affect the parent's residence or reference
+bits.
+
+</p><p>
+If the parent process is not already known to the pager, <tt>vm_create</tt>
+should assume the parent's arena is empty.  This occurs when the parent
+process (e.g., <tt>/bin/bash</tt>) was not linked with
+<a href="https://grader2.eecs.umich.edu/eecs482/project3/libvm_app.o"><tt>libvm_app.o</tt></a>.
+
+</p><p>
+Note that the child process is not running at the time <tt>vm_create</tt>
+is called.  The child process will run when it is switched to via
+<tt>vm_switch</tt>.
+
+<!--
+If the system lacks the resources needed to create the new process,
+<tt>vm_create</tt> should return -1.
+-->
+
+</p><p>
+<tt>vm_create</tt> should ensure that there are
+enough available swap blocks to hold all swap-backed virtual pages (this is
+called <em>eager swap reservation</em>).  If there are not enough free swap blocks,
+<tt>vm_create</tt> should return <tt>-1</tt>.  The benefit of eager swap
+reservation is that applications know at the time of <tt>vm_create</tt> (and
+<tt>vm_map</tt>) that there is no more swap space, rather than when a
+page needs to be evicted.  <tt>vm_create</tt> should return 0 on success.
+
+</p><h3 id="vm_switch">5.3. <tt>vm_switch(pid_t pid)</tt></h3>
+
+<p>
+The infrastructure calls <tt>vm_switch</tt> when the OS scheduler runs a
+different process.  <tt>vm_switch</tt> should take whatever action is
+needed to change address spaces to the process with ID <tt>pid</tt>.
+
+</p><h3 id="vm_map">5.4. <tt>vm_map(const char *filename, size_t block)</tt></h3>
+
+<p>
+<tt>vm_map</tt> is called when a process wants to make another virtual
+page in its arena valid.  <tt>vm_map</tt> should return the
+address of the new valid virtual page.  E.g., if the arena
+before calling <tt>vm_map</tt> is <tt>0x600000000-0x600003fff</tt>, the
+return value of <tt>vm_map</tt> will be <tt>0x600004000</tt>, and the
+resulting valid part of the arena will be <tt>0x600000000-0x600004fff</tt>.
+
+<tt>vm_map</tt> should return <tt>nullptr</tt> if the arena is full.
+
+</p><h4>5.4.1. Swap-backed pages</h4>
+
+<p>
+If <tt>filename</tt> is <tt>nullptr</tt>, <tt>block</tt> is ignored, and
+the new virtual page is swap-backed and private (i.e., not shared with any
+other virtual page).  The application should see each byte of a newly
+mapped swap-backed virtual page as initialized with the value 0.
+
+</p><p>
+Swap-backed pages are stored in the system's swap file when there are no
+free physical pages.
+
+</p><p>
+<tt>vm_map</tt> should ensure that there are enough swap blocks to hold all
+swap-backed virtual pages (eager swap reservation), otherwise
+<tt>vm_map</tt> should return <tt>nullptr</tt>.
+
+<!--
+However, the actual data initialization needed to provide this
+abstraction should be deferred as long as possible.
+-->
+
+</p><h4>5.4.2. File-backed pages</h4>
+
+<p>
+If <tt>filename</tt> is not <tt>nullptr</tt>, it points to a null-terminated C
+string <em><strong>in the application's address space</strong></em>, which
+specifies the name of the file that backs the new virtual page.
+<tt>filename</tt> is specified relative to the pager's current working
+directory.
+
+</p><p>
+The C string pointed to by <tt>filename</tt> should reside completely in
+the valid portion of the application's arena.  Remember that
+<tt>filename</tt> is a pointer to the <strong>application's</strong>
+address space, so <tt>vm_map</tt> will need to access the C string pointed
+to by filename via physical memory.  Your pager should treat
+<tt>vm_map</tt>'s accesses to the application's data exactly as if they
+came from the application program for the purposes of protection,
+residence, and reference bits.
+
+</p><p>
+<tt>vm_map</tt> should return <tt>nullptr</tt> if <tt>filename</tt> is not
+completely in the valid part of the arena.  Other than checking that the C
+string is in the valid part of the arena, <tt>vm_map</tt> need not (and
+should not) verify that filename and block are legal (hint: think about
+when these will be checked).
+
+</p><p>
+At any given point in time, zero or more virtual pages may be mapped to a
+given file and block.  All virtual pages mapped to the same
+<tt>(filename, block)</tt> are shared with each other.  The pager should
+manage all members of a set of shared virtual pages as a single virtual
+page.  E.g., a set of shared virtual pages should be represented as a
+single node on the clock queue.
+
+</p><h3 id="vm_fault">5.5. <tt>vm_fault(const void *addr, bool write_flag)</tt></h3>
+
+<p>
+<tt>vm_fault</tt> is the kernel's page fault handler.  It is called by
+the infrastructure when an application accesses a protected memory location.
+<tt>addr</tt> contains the faulting address; <tt>write_flag</tt>
+is set if the access was a write.
+
+</p><p>
+<tt>vm_fault</tt> should return 0 after successfully handling a fault.
+<tt>vm_fault</tt> should return -1 if it cannot handle the fault (e.g., the
+address is to an invalid page or is outside the arena).
+
+</p><p>
+Your pager determines which accesses in the arena will generate faults by
+setting the <tt>read_enable</tt> and <tt>write_enable</tt> fields in the
+page table.  The actions performed in <tt>vm_fault</tt> will depend on
+the state of the virtual page, and why the pager wanted accesses to
+the page to generate a fault.
+
+<!--
+Most of the design decisions will
+affect which pages
+are faulted on and what actions are required in response to these faults.
+
+<a href="#optimizing">Section 6</a> describes how to design your pager to
+minimize work, and many of these
+-->
+
+<!--
+Your pager determines
+which physical page is associated with a virtual page by setting the ppage
+field in the page table.
+-->
+
+</p><h3 id="vm_destroy">5.6. <tt>vm_destroy()</tt></h3>
+
+<p>
+<tt>vm_destroy</tt> is called by the infrastructure when the corresponding
+application exits.  This gives the pager a chance to clean up any resources
+used by the exiting process, such as page tables, physical pages, and swap
+blocks.
+<!--
+Physical pages that are no longer in use should be put back on the free list.
+-->
+
+</p><h2 id="design">6. Pager design</h2>
+
+<p>
+A major part of this project is designing your pager to minimize the
+work needed to provide the required address space abstractions to
+applications.   This section describes various aspects of how to
+design your pager to minimize work.
+
+</p><h3 id="deferring">6.1. Deferring and avoiding work</h3>
+
+<p>
+The main way to minimize work is to avoid and defer work whenever possible.
+There are points in this project where careful state maintenance
+can help you avoid doing work.  Whenever possible, avoid work.  For
+example, if a page that is being evicted does not need to be written to
+disk, don't do so.  (However, the victim selection algorithm in
+<a href="https://grader2.eecs.umich.edu/eecs482/project3/#nonresident">Section 6.2</a> must be used as specified; e.g.,
+don't change the victim selection to avoid writing a page to disk).
+
+</p><p>
+Similarly, there are many points in this project where you have some
+freedom over when page copying, page faults, and disk I/O happen.  Your
+pager should defer such work as far into the future as possible.
+
+</p><p>
+If you could possibly defer or avoid some action at the possible expense of
+making another action necessary, keep in mind that incurring a fault (about
+5 microseconds on current hardware) is cheaper than copying a page (30
+microseconds), which is in turn cheaper than a disk I/O (10 milliseconds).
+For instance, if you have a choice between taking an extra page fault and
+causing an extra disk I/O, you should prefer to take the extra fault.
+
+<!--
+???
+<p id=no_copy_on_write>
+While you are to defer or avoid work when possible, you may not use the
+<a href=https://en.wikipedia.org/wiki/Copy-on-write>copy-on-write</a>
+technique.  Physical pages may only be shared among virtual pages when
+those virtual pages are shared with each other.  Similarly, file blocks
+should only be shared between virtual pages when those virtual pages are
+shared with each other.  That is, each physical page and file block should
+be associated with at most one virtual page (or set of shared virtual
+pages) at any given time.
+-->
+
+</p><h3 id="nonresident">6.2. Replacement and eviction</h3>
+
+<p>
+The virtual memory abstraction allows the address spaces managed by the
+pager to exceed the size of physical memory available to the pager.  This
+is a classic use of caching: storing a subset of data in a fast but small
+space (in this case, physical memory), while the rest of the data lives in
+a large but slow space (in this case, files).
+
+</p><p>
+With virtual memory, some virtual pages will be resident (in physical memory)
+and some will be non-resident (not in physical memory).  Your pager will
+provide the illusion to applications that all virtual pages are resident
+(in fact, other than timing, applications should see no difference
+between resident and non-resident pages).  To maintain this illusion,
+your pager should arrange for faults to occur when an application accesses
+a non-resident page.  When such a fault occurs, the pager should find a
+physical page to associate with the virtual page.  If there are no free
+physical pages, the pager should create a free physical page by evicting a
+virtual page that is resident.
+
+</p><p>
+Use the <em>clock</em> (also called FIFO with second-chance) algorithm to
+select a victim.  The clock queue is an ordered list of all physical pages
+that are currently in use.  To select a victim, remove and examine the page
+at the head of the queue.  If the head page has been accessed since it was
+last enqueued, it should be moved to the tail of the queue, and victim
+selection should proceed to the next page in the queue.  If the page at the
+head has not been accessed since it was last enqueued, its virtual page
+should be evicted.  All physical pages that are in use are treated the same
+when selecting a victim page to evict.  When a virtual page is made
+resident, it should be placed at the tail of the clock queue and marked as
+referenced.
+
+</p><p>
+When the pager evicts a virtual page, it may need to write the page's data
+to the backing storage for that page (either the swap file or the file
+block specified when thage page was mapped).  Since disk I/O is expensive,
+the pager should only write data to the file if the page is <em>dirty</em>,
+i.e., its contents differ from the contents in the file.
+
+</p><p>
+To implement the clock replacement algorithm and avoid writing data
+unnecessarily to disk, you will need to maintain reference and dirty bits
+for each resident virtual page.  Since the MMU for this project does not
+maintain dirty or reference bits, your pager will need to maintain these
+bits in its own data structure, by (1) setting the protection bits to
+generate page faults on relevant accesses and (2) updating the state of the
+faulting virtual page in <tt>vm_fault</tt>.
+
+<!--
+<li> Hint: The order of pages in the clock queue may differ from the order of
+their physical page numbers.
+-->
+
+</p><h3 id="cow">6.3. Copy-on-write sharing</h3>
+
+<p>
+Your pager may share a physical page, file block, or swap block among
+multiple virtual pages.  It should manage a set of virtual pages that share
+physical resources as a single virtual page.  E.g., a set of virtual pages
+that share a physical page should be represented as a single node on the
+clock queue.
+
+</p><p>
+Sharing a physical resource can be used for two different purposes:
+
+</p><ul>
+
+<li> It can help the pager provide the abstraction of a shared virtual
+page, i.e., when multiple virtual pages are mapped to a particular file
+block.  In this case, sharing takes place both at the physical level (from
+the hardware's perspective) and at the virtual level (from the
+application's perspective).
+
+</li><li> It can help the pager reduce resource usage and save work, even when
+the virtual pages that are using this resource are <em>not</em> shared from
+an application's perspective.  The rest of this section is about this
+use of sharing, which we call <em>copy-on-write</em> sharing.
+
+</li></ul>
+
+<p>
+Copy-on-write sharing is useful when multiple virtual pages are not shared
+from an application's perspective, but have the same data values.  For
+example, when a parent process calls <tt>fork</tt>, the data in the
+child's pages are the same values as the data in the parent's pages.
+As long as the data values are guaranteed to match, the parent and child's
+virtual pages can both be stored in the same physical resource.  However,
+when the data changes in either the parent's or child's virtual page,
+both virtual pages will no longer be able to use the same physical
+resource, so another copy will need to be made.  This technique is called
+copy-on-write because a copy operation is deferred until one of the virtual
+pages is written.
+
+</p><p>
+Your pager should use copy-on-write sharing whenever it can deduce (without
+examining the data on the page) that two or more virtual pages have the
+same data but are not being shared from an application's perspective.
+
+</p><p>
+A copy operation will occur when one of the virtual pages using
+copy-on-write sharing is written.  Your pager will initiate the copy
+operation in response to an application's store instruction, and should
+carry out this copy operation as follows:
+
+</p><ol>
+
+<li> Read the data from the page, and write it into a temporary buffer.
+The temporary buffer should be a normal variable in the kernel's address
+space (not a page allocated from physical memory).  This read should have
+the same effect on the contents of physical memory, page tables, and the
+clock queue as if the application process had read the page.
+
+</li><li> Write the data (from the temporary buffer) to a new physical page.  The
+new physical page should be assigned to the virtual page whose write
+triggered the copy-on-write operation; the other virtual page(s) should
+retain the old physical page.  This write should have the same effect on
+the contents of physical memory, page tables, and clock queue as if the
+application process initiating the copy-on-write is writing the page
+(which, of course, it is).
+
+</li></ol>
+
+<p>
+The advantage of using a temporary buffer (instead of copying the data
+directly between two physical memory pages) is it avoids the need to keep
+both the old page and the new page in physical memory at the same time.
+
+</p><p>
+Hint: Writing to a virtual page that is being shared via copy-on-write
+should have the same effect on the system as reading it, then writing it.
+
+</p><h3>6.4. Pinning memory</h3>
+
+<p>
+Kernels sometimes guarantee that certain virtual memory pages will not be
+evicted.  We refer to this technique as <em>pinning</em>.  Pinning a page
+may improve performance or simplify the kernel.  In some systems (though
+not this project), pinning a page is needed to eliminate circular
+dependencies.
+
+</p><p>
+In this project, you will use pinning to reserve a physical page in
+which all bytes have the integer value zero (not the character '0').
+This <em>zero page</em> should be allocated and initialized with zeroes
+when the pager starts, and it should never be evicted.  Having a physical page
+full of zeroes is useful in this project because all swap-backed pages are
+(from the perspective of applications) initialized with zeroes when they
+are first mapped.
+
+</p><p>
+Use the zero page to reduce faults for swap pages.  Consider what
+<tt>read_enable</tt> and <tt>write_enable</tt> should be for virtual
+page(s) that are mapped to the zero page, and remember to avoid and defer
+work whenever possible.
+
+</p><h2 id="hardware">7. Interface used by pager to access the simulated hardware</h2>
+
+<p>
+The following portion of <a href="https://grader2.eecs.umich.edu/eecs482/project3/vm_pager.h"><tt>vm_pager.h</tt></a>
+describes the variables and utility functions for accessing physical memory
+and files.
+
+</p><hr>
+<pre>/*
+ * ****************************************
+ * * Public interface for accessing files *
+ * ****************************************
+ *
+ * You may assume that no other application accesses a file used
+ * by the pager while the pager is running.  You may also assume
+ * that, once a file block is accessed successfully, it will remain
+ * accessible.
+ */
+
+/*
+ * file_read
+ *
+ * Read page from the specified file and block into buf.
+ * If filename is nullptr, the data is read from swap.  buf should be
+ * an address in vm_physmem.
+ * Returns 0 on success; -1 on failure.
+ */
+extern int file_read(const char *filename, size_t block, void *buf);
+
+/*
+ * file_write
+ *
+ * Write page from buf to the specified file and block.
+ * If filename is nullptr, the data is written to swap.  buf should be
+ * an address in vm_physmem.
+ * Returns 0 on success; -1 on failure.
+ */
+extern int file_write(const char *filename, size_t block, const void *buf);
+
+/*
+ * ********************************************************
+ * * Public interface for the physical memory abstraction *
+ * ********************************************************
+ *
+ * Physical memory pages are numbered from 0 to (memory_pages-1), where
+ * memory_pages is the parameter passed in vm_init().
+ *
+ * Your pager accesses the data in physical memory through the variable
+ * vm_physmem, e.g., ((char *)vm_physmem)[5] is byte 5 in physical memory.
+ */
+extern void * const vm_physmem;
+</pre>
+<hr>
+
+<p>
+Physical memory is structured as a contiguous collection of M pages, numbered
+from 0 to M-1.  M is settable through the -m option when you run the
+pager (e.g., by running <tt>pager -m 4</tt>).  The minimum number of
+physical pages is 2, the maximum is 1024, and the default is 4.  Your pager
+can access the data in physical memory via the array <tt>vm_physmem</tt>.
+
+</p><p>
+Swap space is structured as a contiguous collection of S blocks, numbered
+from 0 to S-1.  S is settable through the -s option when you run the
+pager (e.g., by running <tt>pager -s 1024</tt>).  The minimum number of
+swap blocks is 2, the maximum is 4096, and the default is 1024.
+
+</p><p>
+Regular files and the swap file are accessed via <tt>file_read</tt> and
+<tt>file_write</tt>.  If <tt>filename</tt> is <tt>nullptr</tt>, these
+functions access the swap file; otherwise they access the specified file.
+Each call accesses one disk block, which is the same size as a physical
+memory page.  <tt>file_read</tt> reads data from a file to a physical page;
+<tt>file_writes</tt> reads data from a physical page to a file.
+
+<!--
+<p>
+Your pager controls the operation of the MMU by modifying the contents of
+the page table and the variable <tt>page_table_base_register</tt>.
+-->
+
+</p><h2 id="hints">8. Hints</h2>
+
+<p>
+First, draw a finite state machine for the life of a virtual page, from
+creation via <tt>vm_map</tt> to destruction via <tt>vm_destroy</tt>.
+Consider what events can happen to a page throughout its lifetime,
+and what state you will need to keep to represent each state.  As you
+design the state machine, try to identify all of the places in the state
+machine where work can be deferred or avoided.  Most of this project hinges
+on getting this state machine correct.
+
+</p><p>
+You may find it helpful to draw two state machines, one for swap-backed
+pages and another for file-backed pages (they are similar but not
+identical).
+
+<!--
+<p>
+I recommend you not translate the finite state machine directly into code.
+The state machine is a good way to think through what can happen to a page
+through its lifetime, but translating it directly into code will lead to
+a lot of redundant code because much of the functionality in each state is
+the same.  Instead, think about each of your state bits independently and
+try to factor the code that manipulates these bits out of each individual
+state.
+-->
+
+</p><p>
+Approach the project incrementally, rather than all at once.  First, write
+<strong>and test</strong> a pager that only handles swap-backed pages for a
+single process.  After this is working, then add support for file-backed
+pages, then add support for fork.  However, you'll need to plan ahead for
+the notion of sharing hardware resources among several virtual pages (see
+<a href="https://grader2.eecs.umich.edu/eecs482/project3/#cow">Section 6.3</a>).
+
+</p><p>
+Read-faults should typically make the virtual page read-only
+(<tt>read_enable=1</tt>, <tt>write_enable=0</tt>), but not always.
+
+</p><p>
+Virtual pages will never be write-only (<tt>read_enable=0</tt>,
+<tt>write_enable=1</tt>).
+
+</p><p>
+Use assertion statements copiously in your process library to check for
+unexpected conditions generated by bugs in your program.  These error checks
+are essential in debugging complex programs because they help flag error
+conditions early.
+
+</p><h2 id="testcases">9. Test cases</h2>
+
+<p>
+An integral (and graded) part of writing your pager will be to write a suite of
+test cases to validate any pager.  This is common practice in the real
+world--software companies maintain a suite of test cases for their programs and
+use this suite to check the program's correctness after a change.  Writing a
+comprehensive suite of test cases will deepen your understanding of virtual
+memory, and it will help you a lot as you debug your pager.  To construct a
+good test suite, trace through different transition paths that a page can take
+through a pager's state machine, then write a short test case that causes a
+page to take each path.
+
+</p><p>
+Each test case for the pager will be a short C++ application program that
+uses a pager via the interface described in <a href="https://grader2.eecs.umich.edu/eecs482/project3/#calls">Section 4</a>
+(e.g., the example program in <a href="https://grader2.eecs.umich.edu/eecs482/project3/#calls">Section 4</a>).  Each
+test case should be run without any arguments and should not use any input
+files.  Test cases should exit(0) when run with a correct pager.
+
+</p><p>
+Your test suite may contain up to 30 test cases.  Each test case may cause
+a correct pager to generate at most 1 MB of output and must take less
+than 60 seconds to run.  These limits are much larger than needed for full
+credit.  You will submit your suite of test cases together with your pager,
+and we will grade your test suite according to how thoroughly it exercises
+a pager.  <a href="https://grader2.eecs.umich.edu/eecs482/project3/#grading">Section 10</a> describes how your test suite
+will be graded.
+
+</p><p>
+The name of each test case should start with <tt>test</tt> and end with
+<tt>.cc</tt> or <tt>.cpp</tt>.  Each test case will also specify the number
+of physical memory pages to use when running the pager (the -m option) for
+that test case.  This parameter will be specified as a dot-separated field
+in the name of the test case file, just before the <tt>.cc</tt> or
+<tt>.cpp</tt> filename extension.  For example, a test case that tests
+eviction and configures the pager to have 4 memory pages might be named
+<tt>testEvict.4.cc</tt> .  Remember that the minimum number of physical
+memory pages is 2 and the maximum is 1024.  Your test cases may assume that
+<tt>vm_init</tt> is called with swap_blocks=1024.
+
+</p><p>
+Your test cases may assume that the pager runs in a directory that has
+the following files:
+<a href="https://grader2.eecs.umich.edu/eecs482/project3/shakespeare.txt">shakespeare.txt</a>,
+<a href="https://grader2.eecs.umich.edu/eecs482/project3/data1.bin">data1.bin</a>,
+<a href="https://grader2.eecs.umich.edu/eecs482/project3/data2.bin">data2.bin</a>,
+<a href="https://grader2.eecs.umich.edu/eecs482/project3/data3.bin">data3.bin</a>,
+<a href="https://grader2.eecs.umich.edu/eecs482/project3/data4.bin">data4.bin</a>.
+Use these files for test cases that map pages to files.
+
+</p><p>
+You should test your pager with both single and multiple applications
+running.  Most of the test cases you submit need only be a single process,
+but some of the buggy pagers used to evaluate your test suite can only be
+exposed by multi-process test cases.  Use <tt>vm_yield</tt> to coordinate
+the order in which processes run.
+
+</p><h2 id="logistics">10. Project logistics</h2>
+
+<p>
+Write your pager in C++ on Linux.  The public functions in
+<a href="https://grader2.eecs.umich.edu/eecs482/project3/vm_pager.h"><tt>vm_pager.h</tt></a> are declared <tt>extern</tt>,
+but all other functions and global variables in your pager should be
+declared <tt>static</tt> to prevent naming conflicts with other libraries.
+
+</p><p>
+Use <tt>g++ 4.8.5</tt> to compile your programs.
+<!--
+To use <tt>g++ 4.8.3</tt>
+on CAEN computers, put the following command in your startup file (e.g.,
+<tt>~/.profile</tt>):
+
+<pre>
+module load gcc
+module load gdb/7.5.1
+</pre>
+-->
+
+</p><p>
+You may use any functions included in the standard C++ library, including
+the STL.  You should not use any libraries other than the standard C++
+library.  To compile a pager <tt>pager.cc</tt>, run:
+
+</p><pre>g++ -g -Wall pager.cc libvm_pager.o -std=c++11
+</pre>
+
+To compile an application <tt>app.cc</tt>, run:
+<pre>g++ -g -Wall app.cc libvm_app.o -ldl -std=c++11
+</pre>
+
+<p>
+Your pager code may be in multiple files.  Each file name must end with
+<tt>.cc</tt>, <tt>.cpp</tt>, or <tt>.h</tt> and must not start with
+<tt>test</tt>.
+
+</p><p>
+Here's how to run your pager and an application.  First start the pager.
+The infrastructure will print a message saying <tt>Pager started with #
+physical memory pages</tt>, where <tt>#</tt> refers to the number of
+physical memory pages.  After the pager starts, you can run one or more
+application processes which will interact with the pager via the
+infrastructure.  The same user must run the pager and the applications that
+use the pager, and all processes must run on the same computer.
+
+</p><p>
+We have created a private <a href="https://github.com/eecs482">github</a>
+repository for your group (<tt>eecs482/&lt;group&gt;.3</tt>), where
+<tt>&lt;group&gt;</tt> is the sorted, dot-separated list of your group members'
+uniqnames.  Initialize your local repository by cloning the (empty)
+repository from github, e.g.,
+
+</p><pre>git clone git@github.com:eecs482/uniqnameA.uniqnameB.3
+</pre>
+
+<h2 id="grading">11. Grading, auto-grading, and formatting</h2>
+
+<p>
+To help you validate your programs, your submissions will be graded
+automatically, and the results will be provided to you.  You may then
+continue to work on the project and re-submit.  The results from the
+auto-grader will not be very illuminating; they won't tell you where your
+problem is or give you the test programs.  The main purpose of the auto-grader
+is to help you know to keep working on your project (rather than thinking it's
+perfect and ending up with a 0).  The best way to debug your program is to
+generate your own test cases, figure out the correct answers, and compare your
+program's output to the correct answers.  This is also one of the best ways to
+learn the concepts in the project.
+
+</p><p>
+Hint: here is a (very rough) categorization of some of the test cases used
+by the auto-grader.  Some test cases appear in multiple categories.  Note
+that "no fork" test cases may still be running multiple simultaneous
+processes (all started by a process that is not controlled by the pager).
+
+</p><ul>
+<li>1-8,21-24,32-39: swap-backed pages; no fork
+</li><li>0,9-20,25-31,53-62,70: swap and file-backed pages; no fork
+</li><li>40-52: swap-backed pages; fork
+</li><li>63-69: swap and file-backed pages; fork
+</li></ul>
+
+<p>
+The student suite of test cases will be graded according to how thoroughly they
+test a pager.  We will judge thoroughness of the test suite by how well it
+exposes potential bugs in a pager.  The auto-grader will first run a test case
+with a correct pager and generate the correct output <em>from the pager</em>
+(on <tt>stdout</tt>, i.e., the stream used by <tt>cout</tt>) for this test
+case.  The auto-grader will then run the test case with a set of buggy
+pagers.  A test case exposes a buggy pager by causing the buggy pager to
+generate output (on <tt>stdout</tt>) that differs from the correct output.
+The test suite is graded based on how many of the buggy pagers were exposed
+by at least one test case.  This is known as <em>mutation testing</em> in
+the research literature on automated testing.
+
+</p><p>
+You may submit your program as many times as you like.  However, only the
+feedback from the first submission of each day will be provided to you.
+Later submissions on that day will be graded and cataloged, but the results
+will not be provided to you.  See the <a href="https://grader2.eecs.umich.edu/eecs482/faq.html#limit">FAQ</a> for
+why we use this policy.
+
+</p><p>
+In addition to this one-per-day policy, you will be given 3 bonus submissions
+that also provide feedback.  These will be used automatically--any submission
+you make after the first one of that day will use one of your bonus
+submissions.  After your 3 bonus submissions are used up, the system will
+continue to provide 1 feedback per day.
+
+</p><p>
+Because your programs will be auto-graded, you must be careful to follow the
+exact rules in the project description.  In particular:
+
+</p><ul>
+
+<li>Your pager code should not print any output.  The pager infrastructure
+prints messages to help you debug (and to allow the auto-grader to
+understand what the pager is doing); you can disable these messages by
+running the pager with the <tt>-q</tt> flag.
+
+</li><li>Do not modify the header files provided in this handout.
+
+</li></ul>
+
+<p>
+In addition to the auto-grader's evaluation of your program's correctness, a
+human grader will evaluate your program on issues such as the clarity and
+completeness of your documentation, coding style, the efficiency, brevity, and
+understandability of your code, etc..
+Although your pager is being run with a small number of pages, disk blocks,
+and processes, your algorithms and data structures should be optimized for
+larger numbers.
+<!--
+Your pager documentation should give an
+overall picture of your solution, with enough detail that we can easily read
+and understand your code.
+You should present a list of all of the places in
+your solution that you deferred work; give both the event that you deferred,
+and the time at which you had to do the work.
+-->
+Your final score will be the
+product of the hand-graded score (between 1-1.12) and the auto-grader score.
+
+</p><h2 id="submission">12. Turning in the project</h2>
+
+<p>
+<a href="https://grader2.eecs.umich.edu/eecs482/submit.php?3">Submit</a>
+the following files for your pager:
+
+</p><ul>
+
+<li>C++ program for your pager.  File names should end in <tt>.cc</tt>,
+<tt>.cpp</tt> or <tt>.h</tt> and must not start with <tt>test</tt>.
+Do not submit the files provided in this handout.
+
+</li><li>Suite of test cases.  Each test case should be in a single file.
+File names must follow the format described in <a href="https://grader2.eecs.umich.edu/eecs482/project3/#hints">Section 8</a>.
+
+</li></ul>
+
+<p>
+Each person should also describe the contributions of each team member
+using the following <a href="https://grader2.eecs.umich.edu/eecs482/peer.php?peer3">web form</a>.
+
+</p><p>
+The official time of submission for your project will be the time of your
+last submission.  Submissions after the due date will automatically use up
+your late days; if you have no late days left, late submissions will not be
+counted.
+
+</p><h2 id="files">12. Files included in this handout (<a href="https://grader2.eecs.umich.edu/eecs482/project3/handout.zip">zip file</a>)</h2>
+
+<ul>
+<li><a href="https://grader2.eecs.umich.edu/eecs482/project3/libvm_app.o"><tt>libvm_app.o</tt></a>
+</li><li><a href="https://grader2.eecs.umich.edu/eecs482/project3/libvm_pager.o"><tt>libvm_pager.o</tt></a>
+</li><li><a href="https://grader2.eecs.umich.edu/eecs482/project3/vm_app.h"><tt>vm_app.h</tt></a>
+</li><li><a href="https://grader2.eecs.umich.edu/eecs482/project3/vm_pager.h"><tt>vm_pager.h</tt></a>
+</li><li><a href="https://grader2.eecs.umich.edu/eecs482/project3/vm_arena.h"><tt>vm_arena.h</tt></a>
+</li><li><a href="https://grader2.eecs.umich.edu/eecs482/project3/shakespeare.txt"><tt>shakespeare.txt</tt></a>
+</li><li><a href="https://grader2.eecs.umich.edu/eecs482/project3/data1.bin"><tt>data1.bin</tt></a><tt>
+</tt></li><li><tt><a href="https://grader2.eecs.umich.edu/eecs482/project3/data2.bin"><tt>data2.bin</tt></a><tt>
+</tt></tt></li><li><tt><tt><a href="https://grader2.eecs.umich.edu/eecs482/project3/data3.bin"><tt>data3.bin</tt></a><tt>
+</tt></tt></tt></li><li><tt><tt><tt><a href="https://grader2.eecs.umich.edu/eecs482/project3/data4.bin"><tt>data4.bin</tt></a><tt>
+</tt></tt></tt></tt></li></ul><tt><tt><tt>
+
+<p>
+<strong>Experimental</strong>: If you are running Ubuntu Linux, you may be
+able to use these (unofficial and unsupported) versions of
+<a href="https://grader2.eecs.umich.edu/eecs482/project3/libvm_app.ubuntu.o"><tt>libvm_app.o</tt></a>
+and <a href="https://grader2.eecs.umich.edu/eecs482/project3/libvm_pager.ubuntu.o"><tt>libvm_pager.o</tt></a>.
+
+
+
+</p></tt></tt></tt><div id="ghostery-purple-box" class="ghostery-bottom ghostery-right ghostery-none ghostery-collapsed"><div id="ghostery-box"><div id="ghostery-count" style="background: none; color: rgb(255, 255, 255);">0</div><div id="ghostery-pb-icons-container"><span id="ghostery-breaking-tracker" class="ghostery-pb-tracker" title="Broken Page Trackers" style="background: url(&quot;data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiIHN0YW5kYWxvbmU9Im5vIj8+DQo8c3ZnIHdpZHRoPSIxOHB4IiBoZWlnaHQ9IjE4cHgiIHZpZXdCb3g9IjAgMCAxOCAxOCIgdmVyc2lvbj0iMS4xIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIj4NCiAgICA8IS0tIEdlbmVyYXRvcjogU2tldGNoIDQwICgzMzc2MikgLSBodHRwOi8vd3d3LmJvaGVtaWFuY29kaW5nLmNvbS9za2V0Y2ggLS0+DQogICAgPHRpdGxlPmJyZWFraW5ncGFnZTwvdGl0bGU+DQogICAgPGRlc2M+Q3JlYXRlZCB3aXRoIFNrZXRjaC48L2Rlc2M+DQogICAgPGRlZnM+PC9kZWZzPg0KICAgIDxnIGlkPSJQdXJwbGUtQm94IiBzdHJva2U9Im5vbmUiIHN0cm9rZS13aWR0aD0iMSIgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIj4NCiAgICAgICAgPGcgdHJhbnNmb3JtPSJ0cmFuc2xhdGUoLTQxNi4wMDAwMDAsIC00NTMuMDAwMDAwKSIgaWQ9ImJhbSEtYnJlYWtpbmctdGhlLXBhZ2UtY29weS0yIiBmaWxsPSIjRkNCQTMzIj4NCiAgICAgICAgICAgIDxnIHRyYW5zZm9ybT0idHJhbnNsYXRlKDQxNi4wMDAwMDAsIDQ1My4wMDAwMDApIj4NCiAgICAgICAgICAgICAgICA8cGF0aCBkPSJNOSwwLjE5NTY1MjE3NCBDNC4xNDQzNjAyNSwwLjE5NTY1MjE3NCAwLjE5NTY1MjE3NCw0LjE0NDM2MDI1IDAuMTk1NjUyMTc0LDkgQzAuMTk1NjUyMTc0LDEzLjg1NTYzOTggNC4xNDQzNjAyNSwxNy44MDQzNDc4IDksMTcuODA0MzQ3OCBDMTMuODU1NjM5OCwxNy44MDQzNDc4IDE3LjgwNDM0NzgsMTMuODU1NjM5OCAxNy44MDQzNDc4LDkgQzE3LjgwNDM0NzgsNC4xNDQzNjAyNSAxMy44NTU2Mzk4LDAuMTk1NjUyMTc0IDksMC4xOTU2NTIxNzQgWiBNMTEuNDg1NTg5OSwxMy40MTA0NDQxIEwxMS4wNzcwNzk4LDEzLjAyMDY3NjggTDEyLjEwMDQ3MTEsMTIuMjE2OTU3OSBMMTEuMDQ2MjQ1MSwxMi4yMTY5NTc5IEwxMS4yMzQ0NzgxLDEwLjg3MDcwODcgTDkuODAzMTgxNDIsMTEuNzk1NzUxMiBMOS40MDMzMzczNCw5LjM0NTA5MzkyIEw4LjY5NDc0MjY5LDExLjA4NjU1MTkgTDcuMzI1NzIwMDksMTAuMTcwOTgxNSBMNy43NTI1Njk3NywxMS45Mjk1NyBMNi41NTQyNDY3MywxMi4zMTE0Nzc1IEw3Ljg4MjM1Nzg3LDEzLjQxMDQ0NDEgTDExLjQ4NTU4OTksMTMuNDEwNDQ0MSBaIE02LjcxNTY3NTcyLDEzLjQxMDQ0NDEgTDUuMDI4NjMxOTcsMTIuMDA2NzU3NiBMNi44Njg0Mzg3MywxMS40MzE5ODE4IEw2LjE2Mzg3NDc3LDguNDg4NTczMDkgTDguMzQ5MzEyODgsOS45NTk5NzUxMiBMOS43MDQwMjY1NCw2LjYxMjQ5MDE1IEwxMC4zNTAzNDcxLDEwLjU1NjcxODIgTDEyLjE5NDk5MDcsOS4zNzY1MzMyOCBMMTEuODk4OTM2OCwxMS40NzY5MjM5IEwxNC4yNjI5MzQzLDExLjQ3NjkyMzkgTDEyLjIxMjkyNzIsMTMuMDc4OTIwMiBMMTIuNTY3MjI0NSwxMy40MTA0NDQxIEwxNS4zMzEyNjc3LDEzLjQxMDQ0NDEgTDE0LjQ3Mzk0MDcsMTIuNTk4NjYzOSBMMTcuMjA3MzUwNiwxMC40NjY4MzM5IEwxMy4wNjA3ODIxLDEwLjQ2NjgzMzkgTDEzLjQ5NjI5NzcsNy4zNDg2OTUgTDExLjA5OTg1MzIsOC44Nzg5NDUwNSBMMTAuMTIxMjAyNiwyLjg5Mjc3MTMgTDcuODc3NzIyNTgsOC40MjU0OTI4NSBMNC41NzA1NDQ0Nyw2LjIwMzk4MDEgTDUuNjY1NDgwNDEsMTAuNzUwMzkyNyBMMi45NTEwMTQ3MiwxMS41OTgyNDc2IEw1LjEzNjQ1MjgzLDEzLjQxMDQ0NDEgTDYuNzE1Njc1NzIsMTMuNDEwNDQ0MSBaIiBpZD0iYnJlYWtpbmdwYWdlIj48L3BhdGg+DQogICAgICAgICAgICA8L2c+DQogICAgICAgIDwvZz4NCiAgICA8L2c+DQo8L3N2Zz4=&quot;); opacity: 0.5;"></span><span id="ghostery-slow-tracker" class="ghostery-pb-tracker" title="Slow Trackers" style="background: url(&quot;data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiIHN0YW5kYWxvbmU9Im5vIj8+DQo8c3ZnIHdpZHRoPSIxN3B4IiBoZWlnaHQ9IjE3cHgiIHZpZXdCb3g9IjAgMCAxNyAxNyIgdmVyc2lvbj0iMS4xIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIj4NCiAgICA8IS0tIEdlbmVyYXRvcjogU2tldGNoIDQwICgzMzc2MikgLSBodHRwOi8vd3d3LmJvaGVtaWFuY29kaW5nLmNvbS9za2V0Y2ggLS0+DQogICAgPHRpdGxlPnNsb3d0cmFja2VyczwvdGl0bGU+DQogICAgPGRlc2M+Q3JlYXRlZCB3aXRoIFNrZXRjaC48L2Rlc2M+DQogICAgPGRlZnM+PC9kZWZzPg0KICAgIDxnIGlkPSJQdXJwbGUtQm94IiBzdHJva2U9Im5vbmUiIHN0cm9rZS13aWR0aD0iMSIgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIj4NCiAgICAgICAgPGcgdHJhbnNmb3JtPSJ0cmFuc2xhdGUoLTM5NS4wMDAwMDAsIC00NTQuMDAwMDAwKSIgaWQ9InNsb3d0cmFja2VycyIgZmlsbD0iI0ZDQkEzMyI+DQogICAgICAgICAgICA8cGF0aCBkPSJNNDAzLjUsNDU0IEMzOTguODEyMjEsNDU0IDM5NSw0NTcuODEyMjEgMzk1LDQ2Mi41IEMzOTUsNDY3LjE4Nzc5IDM5OC44MTIyMSw0NzEgNDAzLjUsNDcxIEM0MDguMTg3NzksNDcxIDQxMiw0NjcuMTg3NzkgNDEyLDQ2Mi41IEM0MTIsNDU3LjgxMjIxIDQwOC4xODc3OSw0NTQgNDAzLjUsNDU0IFogTTQwOS42MDk1ODQsNDY1LjE3ODY1NCBDNDA5LjUzMDI1OSw0NjUuMTU0MDkgNDA4LjY3NzI4Myw0NjQuNzQ2NDIgNDA3LjU2MTA5MSw0NjQuMzYyNjM3IEM0MDguNDg0Mzc4LDQ2My43NDU2MSA0MDkuMDk0NDE4LDQ2Mi42OTM2NDUgNDA5LjA5NDQxOCw0NjEuNTAxNzMzIEM0MDkuMDk0NDE4LDQ1OS42MDU1ODEgNDA3LjU1MTQwMSw0NTguMDYyMzM4IDQwNS42NTUyNDksNDU4LjA2MjMzOCBDNDAzLjc1OTA5Nyw0NTguMDYyMzM4IDQwMi4yMTU4NTQsNDU5LjYwNTU4MSA0MDIuMjE1ODU0LDQ2MS41MDE3MzMgQzQwMi4yMTU4NTQsNDYyLjA0OTM1IDQwMi4zNDUyMDgsNDYyLjU2Njc2OSA0MDIuNTczMjY5LDQ2My4wMjY0OTcgQzQwMi43ODgwMzQsNDYzLjA2ODYzOCA0MDMuMzQ0NDQsNDYzLjE3NTIzMiA0MDQuMjIzNzgyLDQ2My4zMjM5NjggQzQwNS4yMDQ1MzUsNDYzLjQ5MDI4MSA0MDUuODUyNDM2LDQ2My4zNTY0MTkgNDA2LjM5MTAzOSw0NjIuODc2NjM0IEM0MDYuNzI4MTcyLDQ2Mi41NzY0NTkgNDA2LjkyODA2NCw0NjIuMTYzNjA2IDQwNi45NTM1MjksNDYxLjcxMzc5NCBDNDA2Ljk4MDEyMSw0NjEuMjYzOTgxIDQwNi44Mjk1ODMsNDYwLjgyOTk0NCA0MDYuNTI5NDA4LDQ2MC40OTM3MTIgQzQwNi4wNDY5MTksNDU5Ljk1MjQwNSA0MDUuMjE1MTI3LDQ1OS45MDM5NTMgNDA0LjY3MjY5Myw0NjAuMzg1NTQxIEM0MDQuMjM5NTU3LDQ2MC43NzExMjYgNDA0LjE4NTAyMSw0NjEuNDQ0NDkyIDQwNC41NTIxMjcsNDYxLjg1NzM0NiBDNDA0Ljg0MDEzMyw0NjIuMTgwNTA3IDQwNS4zNjk5NDcsNDYyLjIxNzQ2NiA0MDUuNjg2Nzk5LDQ2MS45MzU3NyBDNDA1LjgwMzk4NCw0NjEuODMxODggNDA1Ljg3MzM5NCw0NjEuNjkyODM1IDQwNS44ODA2MDYsNDYxLjU0NDc3NiBDNDA1Ljg4NjY5LDQ2MS40MjQyMSA0MDUuODUwNjMzLDQ2MS4zMTA2MyA0MDUuNzgwOTk4LDQ2MS4yMzQwMDkgQzQwNS43MTg1NzQsNDYxLjE2NTUgNDA1LjYxOTE5Miw0NjEuMTI3NjQxIDQwNS41MTY4OCw0NjEuMTI4NTQyIEM0MDUuNDI5ODkyLDQ2MS4xMzEwMjEgNDA1LjMxNzIxNCw0NjEuMTY1NSA0MDUuMjQ0MTk4LDQ2MS4yMzc2MTUgQzQwNS4yMjYzOTUsNDYxLjI1NDI5MSA0MDUuMjA0NTM1LDQ2MS4yNjQ4ODMgNDA1LjE3OTc0Niw0NjEuMjY0ODgzIEM0MDUuMTI2MTExLDQ2MS4yNjQ4ODMgNDA1LjA4MzA2OCw0NjEuMjE2NDMxIDQwNS4wODMwNjgsNDYxLjE1NzYxMyBDNDA1LjA4MzA2OCw0NjEuMTIxMzMxIDQwNS4wOTc5NDEsNDYxLjA5NDk2NCA0MDUuMTE2NDIxLDQ2MS4wNjk0OTggQzQwNS4yMjYzOTUsNDYwLjkxODk2IDQwNS4zODE0NCw0NjAuODMxNzQ3IDQwNS41MzUzNTksNDYwLjgxODY3NiBDNDA1Ljc0NDAzOSw0NjAuODAxMDk5IDQwNS45MTMwNTcsNDYwLjg2MDgxOCA0MDYuMDQ2OTE5LDQ2MS4wMDc3NTEgQzQwNi4xNzk4NzksNDYxLjE1NDAwNyA0MDYuMjQ5Mjg5LDQ2MS4zNDg0OSA0MDYuMjM3MTIsNDYxLjU2MzI1NSBDNDA2LjIyMzgyNCw0NjEuODA2MTkgNDA2LjExMjk0OCw0NjIuMDMyNDQ4IDQwNS45MjM2NDksNDYyLjIwMDU2NCBDNDA1LjQ1NzE2LDQ2Mi42MTYxMjIgNDA0LjcwNzE3Myw0NjIuNTY2MDkzIDQwNC4yODU1Myw0NjIuMDkzMjk0IEM0MDMuNzg5NzQ1LDQ2MS41MzU5ODcgNDAzLjg1ODQ3OSw0NjAuNjMyMDgxIDQwNC40MzUxNjcsNDYwLjExNzgxNyBDNDA1LjEyMzQwNyw0NTkuNTA1Mjk3IDQwNi4xODI1ODQsNDU5LjU2NjgyIDQwNi43OTQyMDIsNDYwLjI1NTI4NCBDNDA3LjE1NzAyNiw0NjAuNjYyNzMgNDA3LjM0MDAxNiw0NjEuMTg4MjYyIDQwNy4zMDg0NjYsNDYxLjczMzE3NCBDNDA3LjI3NjY5MSw0NjIuMjc4OTg4IDQwNy4wMzQ2NTgsNDYyLjc3OTA1NSA0MDYuNjI2OTg3LDQ2My4xNDE2NTQgQzQwNi4xNjgzODYsNDYzLjU1MDIyNiA0MDUuNjMyMjYyLDQ2My43NDY1MTIgNDA0Ljk0NjUwMiw0NjMuNzQ2NTEyIEM0MDQuNzA1MzcsNDYzLjc0NjUxMiA0MDQuNDQ0ODU3LDQ2My43MjE3MjIgNDA0LjE2MzE2Miw0NjMuNjc0Mzk3IEM0MDMuMTkyMDk5LDQ2My41MDk2NjIgNDAyLjE1NTAwNyw0NjMuMzI0ODY5IDQwMi4wMTU5NjIsNDYzLjMwNTQ4OCBDNDAxLjMxNzEzMSw0NjMuMjEyMTkxIDQwMC43MzYxNjEsNDYyLjczNzU4OSA0MDAuNzE3NjgyLDQ2Mi4wMzk2NTkgTDQwMC44OTQ1ODcsNDU4Ljk4NzY1MyBDNDAwLjg5NDU4Nyw0NTguNzkxMzY3IDQwMC43MzUyNiw0NTguNjMxMTM4IDQwMC41MzgwNzIsNDU4LjYzMTEzOCBDNDAwLjM0MDg4NSw0NTguNjMxMTM4IDQwMC4xODE1NTgsNDU4Ljc5MDQ2NSA0MDAuMTgxNTU4LDQ1OC45ODc2NTMgQzQwMC4xODE1NTgsNDU4Ljk4NzY1MyA0MDAuMjg1NDQ3LDQ2MC44NDE0MzcgNDAwLjI5NzYxNyw0NjEuMDc1NTgzIEM0MDAuMzIwNjAzLDQ2MS41MjAyMTIgMzk5LjkxMTEzLDQ2MS44NzY3MjYgMzk5LjQ2MDQxNiw0NjEuODc2NzI2IEMzOTguOTk4NDM1LDQ2MS44NzY3MjYgMzk4LjU4NzE1OSw0NjEuNTAwODMxIDM5OC42MjM0NDEsNDYxLjAzOTUyNiBDMzk4LjY0MzQ5OCw0NjAuNzg0MTk3IDM5OC42NjQ2ODIsNDYwLjUyMDA3OSAzOTguNjg1ODY1LDQ2MC4yNzI4NjIgTDM5OC43NTk3ODIsNDU5LjAwOTUxMiBDMzk4Ljc1OTc4Miw0NTguODEzMjI2IDM5OC42MDA0NTUsNDU4LjY1Mjk5OCAzOTguNDAzMjY4LDQ1OC42NTI5OTggQzM5OC4yMDYwOCw0NTguNjUyOTk4IDM5OC4wNDY3NTMsNDU4LjgxMjMyNSAzOTguMDQ2NzUzLDQ1OS4wMDk1MTIgTDM5OC4yMjAyNzgsNDYxLjk5OTk5NyBMMzk4LjIyMDI3OCw0NjIuMDA1MTggQzM5OC4yMjAyNzgsNDY0LjA5NzYxNyAzOTkuNDE3MzczLDQ2NS44MDI4OTIgNDAxLjUxMDcxMiw0NjUuODAxMDg5IEM0MDMuNjIyNTMxLDQ2NS43OTgzODUgNDA5LjYwODY4Myw0NjUuODAxMDg5IDQwOS42MDg2ODMsNDY1LjgwMTA4OSBDNDA5Ljc4MTA4MSw0NjUuODAxMDg5IDQwOS45MjAzNTEsNDY1LjY2MTE0MyA0MDkuOTIwMzUxLDQ2NS40ODk0MjEgQzQwOS45MjAzNTEsNDY1LjMxNzAyMyA0MDkuNzczMTkzLDQ2NS4yMzA3MTEgNDA5LjYwOTU4NCw0NjUuMTc4NjU0IFoiPjwvcGF0aD4NCiAgICAgICAgPC9nPg0KICAgIDwvZz4NCjwvc3ZnPg==&quot;); opacity: 0.5;"></span><span id="ghostery-non-secure-tracker" class="ghostery-pb-tracker" title="Non-secure Trackers" style="background: url(&quot;data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiIHN0YW5kYWxvbmU9Im5vIj8+DQo8c3ZnIHdpZHRoPSIxOHB4IiBoZWlnaHQ9IjE4cHgiIHZpZXdCb3g9IjAgMCAxOCAxOCIgdmVyc2lvbj0iMS4xIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIj4NCiAgICA8IS0tIEdlbmVyYXRvcjogU2tldGNoIDQwICgzMzc2MikgLSBodHRwOi8vd3d3LmJvaGVtaWFuY29kaW5nLmNvbS9za2V0Y2ggLS0+DQogICAgPHRpdGxlPndhcm5pbmc8L3RpdGxlPg0KICAgIDxkZXNjPkNyZWF0ZWQgd2l0aCBTa2V0Y2guPC9kZXNjPg0KICAgIDxkZWZzPjwvZGVmcz4NCiAgICA8ZyBpZD0iUHVycGxlLUJveCIgc3Ryb2tlPSJub25lIiBzdHJva2Utd2lkdGg9IjEiIGZpbGw9Im5vbmUiIGZpbGwtcnVsZT0iZXZlbm9kZCI+DQogICAgICAgIDxnIHRyYW5zZm9ybT0idHJhbnNsYXRlKC0zNzMuMDAwMDAwLCAtNDUzLjAwMDAwMCkiIGlkPSJ3YXJuaW5nIiBmaWxsPSIjRkVCMDMyIj4NCiAgICAgICAgICAgIDxnIHRyYW5zZm9ybT0idHJhbnNsYXRlKDM3My4wMDAwMDAsIDQ1My4wMDAwMDApIj4NCiAgICAgICAgICAgICAgICA8cGF0aCBkPSJNOSwwLjYzMDQzNDc4MyBDNC4zODQxNDQ5MywwLjYzMDQzNDc4MyAwLjYzMDQzNDc4Myw0LjM4NDE0NDkzIDAuNjMwNDM0NzgzLDkgQzAuNjMwNDM0NzgzLDEzLjYxNTg1NTEgNC4zODQxNDQ5MywxNy4zNjk1NjUyIDksMTcuMzY5NTY1MiBDMTMuNjE1ODU1MSwxNy4zNjk1NjUyIDE3LjM2OTU2NTIsMTMuNjE1ODU1MSAxNy4zNjk1NjUyLDkgQzE3LjM2OTU2NTIsNC4zODQxNDQ5MyAxMy42MTU4NTUxLDAuNjMwNDM0NzgzIDksMC42MzA0MzQ3ODMgWiBNNC42NDI5MjgxMSwxMS43ODk4NTUxIEM1LjI1MDQxMTY1LDExLjc4OTg1NTEgNS43NTY5NTIzNCwxMS4zNjA3NTY3IDUuODc4NzE2OTMsMTAuODgxMzY5NSBDNi4wMDA0ODE1MiwxMS4zNjEyNDM3IDYuNTA3MDIyMjIsMTEuNzIzNzM2OSA3LjExNDM4NCwxMS43MjM3MzY5IEM3LjcyNDE4MTA2LDExLjcyMzczNjkgOC4yMzI2Njk5OSwxMS4zNjUwMTg0IDguMzUxNTEyMjMsMTAuODgyNzA4OSBDOC40NzA5NjMzLDExLjM2NTAxODQgOC45Nzk0NTIyMywxMS43MzY1MjIyIDkuNTg4NzYyMjQsMTEuNzM2NTIyMiBDMTAuMTk0NjYyOCwxMS43MzY1MjIyIDEwLjcwMTIwMzUsMTEuMzk0OTcyNSAxMC44MjM0NTUyLDEwLjkxNjU1OTQgQzEwLjk0NTcwNjgsMTEuMzk0OTcyNSAxMS40NTIyNDc1LDExLjc4OTM2OCAxMi4wNTgyNjk5LDExLjc4OTM2OCBDMTIuMzUzNjcwOCwxMS43ODkzNjggMTIuNjI0NzE4OCwxMS42OTkzODQgMTIuODM5NzU1LDExLjU1OTU5ODIgQzExLjAwOTUxMTUsOC43MTgwOTk3NSAxMi4xNDUzMzE2LDQuMTM3NjgxMTYgMTIuMTQ1MzMxNiw0LjEzNzY4MTE2IEM2Ljk0NjQ3MDYzLDUuMjMxNjE0MjQgNC42NjU4MTk4NSwxMC4xMDAzNzE0IDQuMDU3OTcxMDEsMTEuNjY2MTQyMiBDNC4yMzI5NDY3MywxMS43NDMyMTkyIDQuNDMxNzg4MzEsMTEuNzg5ODU1MSA0LjY0MjkyODExLDExLjc4OTg1NTEgWiIgaWQ9Indhcm5pbmd0cmFja2VycyI+PC9wYXRoPg0KICAgICAgICAgICAgPC9nPg0KICAgICAgICA8L2c+DQogICAgPC9nPg0KPC9zdmc+&quot;); opacity: 0.5;"></span></div><div id="ghostery-title">Looking</div><div id="ghostery-minimize"><span id="ghostery-minimize-icon"></span></div><span id="ghostery-close" style="background: url(&quot;data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiIHN0YW5kYWxvbmU9Im5vIj8+DQo8c3ZnIHdpZHRoPSIxNXB4IiBoZWlnaHQ9IjE1cHgiIHZpZXdCb3g9IjAgMCAxNSAxNSIgdmVyc2lvbj0iMS4xIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIj4NCiAgICA8IS0tIEdlbmVyYXRvcjogU2tldGNoIDMuNy4yICgyODI3NikgLSBodHRwOi8vd3d3LmJvaGVtaWFuY29kaW5nLmNvbS9za2V0Y2ggLS0+DQogICAgPHRpdGxlPmNvbGxhcHNlIGNvcHkgMjwvdGl0bGU+DQogICAgPGRlc2M+Q3JlYXRlZCB3aXRoIFNrZXRjaC48L2Rlc2M+DQogICAgPGRlZnM+PC9kZWZzPg0KICAgIDxnIGlkPSJQdXJwbGUtQm94IiBzdHJva2U9Im5vbmUiIHN0cm9rZS13aWR0aD0iMSIgZmlsbD0ibm9uZSIgZmlsbC1ydWxlPSJldmVub2RkIj4NCiAgICAgICAgPGcgaWQ9ImNvbGxhcHNlLWNvcHktMiI+DQogICAgICAgICAgICA8Y2lyY2xlIGlkPSJPdmFsLTMxNSIgZmlsbC1vcGFjaXR5PSIwLjI3MDE1Mzk4NiIgZmlsbD0iI0Q4RDhEOCIgY3g9IjcuNSIgY3k9IjcuNSIgcj0iNy41Ij48L2NpcmNsZT4NCiAgICAgICAgICAgIDxwYXRoIGQ9Ik00LjM2LDQuMzYgTDEwLjU3NDU2MzQsMTAuNTc0NTYzNCIgaWQ9IkxpbmUiIHN0cm9rZT0iI0ZGRkZGRiIgc3Ryb2tlLWxpbmVjYXA9InNxdWFyZSI+PC9wYXRoPg0KICAgICAgICAgICAgPHBhdGggZD0iTTQuMzYsNC4zNiBMMTAuNTc0NTYzNCwxMC41NzQ1NjM0IiBpZD0iTGluZS1Db3B5IiBzdHJva2U9IiNGRkZGRkYiIHN0cm9rZS1saW5lY2FwPSJzcXVhcmUiIHRyYW5zZm9ybT0idHJhbnNsYXRlKDcuNjAwMDAwLCA3LjYwMDAwMCkgc2NhbGUoLTEsIDEpIHRyYW5zbGF0ZSgtNy42MDAwMDAsIC03LjYwMDAwMCkgIj48L3BhdGg+DQogICAgICAgIDwvZz4NCiAgICA8L2c+DQo8L3N2Zz4=&quot;);"></span></div><div id="ghostery-pb-background"><div id="ghostery-trackerList"></div></div></div></body></html>

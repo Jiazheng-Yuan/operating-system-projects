@@ -1,0 +1,35 @@
+g++ -g -Wall test1.2.cpp -o test1 libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_fake_1.2.cpp -o test_fake_1 libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_fake_2.4.cpp -o test_fake_2 libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_fake_3.6.cpp -o test_fake_3 libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_fake_4.5.cpp -o test_fake_4 libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_fake_5.5.cpp -o test_fake_5 libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_fake_6.4.cpp -o test_fake_6 libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_fake_7.4.cpp -o test_fake_7 libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_fb_page_read_sweep_read_read_write.3.cpp -o test_fb_page_read_sweep_read_read_write libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_fb_page_read_sweep_write.3.cpp -o test_fb_page_read_sweep_write libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_fb_page_write_sweep_read.3.cpp -o test_fb_page_write_sweep_read libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_fb_page_write_sweep_write.3.cpp -o test_fb_page_write_sweep_write libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_file_backed_page_after_process_exit.4.cpp -o test_file_backed_page_after_process_exit libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_file_read_fail.4.cpp -o test_file_read_fail libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_filename_in_fbacked_page.2.cpp -o test_filename_in_fbacked_page libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_filename_two_pages.2.cpp -o test_filename_two_pages libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_fork.2.cpp -o test_fork libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_fork_exec_child.4.cpp -o test_fork_exec_child libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_reservation.2.cpp -o test_reservation libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_sb_page_write_fork_sweep.3.cpp -o test_sb_page_write_fork_sweep libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_sb_page_write_sweep_sweep_read_sweep_read.3.cpp -o test_sb_page_write_sweep_sweep_read_sweep_read libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_sb_page_write_sweep_sweep_read_sweep_sweep.3.cpp -o test_sb_page_write_sweep_sweep_read_sweep_sweep libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_sb_page_write_sweep_sweep_read_sweep_write.3.cpp -o test_sb_page_write_sweep_sweep_read_sweep_write libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_sb_page_write_sweep_write.3.cpp -o test_sb_page_write_sweep_write libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_write_sweep.3.cpp -o test_write_sweep libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_write_sweep_fork_read_write.3.cpp -o test_write_sweep_fork_read_write libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_write_sweep_sweep_fork_load.3.cpp -o test_write_sweep_sweep_fork_load libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_write_to_disk_fbpage.3.cpp -o test_write_to_disk_fbpage libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_writesweepsweeploadsweep.3.cpp -o test_writesweepsweeploadsweep libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_multi_pinned_page_fork_child_write.6.cpp -o test_multi_pinned_page_fork_child_write libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_fb_page_dirty_read_write.3.cpp -o test_fb_page_dirty_read_write libvm_app.o -ldl -std=c++11
+g++ -g -Wall test_filename_pinned_page.3.cpp -o test_filename_pinned_page libvm_app.o -ldl -std=c++11
+
+
+g++ -g -Wall test_filename_sbpage.cpp -o test_filename_sbpage libvm_app.o -ldl -std=c++11

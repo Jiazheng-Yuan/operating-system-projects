@@ -1,0 +1,1 @@
+g++ -g -Wall test_fake_1.4.cpp -o caonima libvm_app.o -ldl -std=c++11
